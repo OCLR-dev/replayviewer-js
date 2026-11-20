@@ -106,9 +106,16 @@ session.destroy();
 - `analyzeReplay(beatmap, replay)` — dispatches on the replay's ruleset and
   returns `{ mode, modDiff, hitResults, scoreFrames, accFrames, comboFrames,
   urTimeline }`.
+- osu!standard replays recorded on osu!stable with ScoreV2 use stable slider
+  head accuracy and ScoreV2 scoring in analysis and playback.
 - `computeModDifficulty(...)`, `applyStacking(...)` — helpers.
 - Ruleset conversions consumers may need alongside the analysis outputs:
   `convertBeatmapToMania`, `convertBeatmapToCatch`, `applyPositionOffsets`, …
+
+Run `npm run build` followed by `npm test` for the scoring regression tests.
+To compare a stable SV2 export with its recorded score, accuracy, max combo and
+judgement counts, set `SV2_REPLAY` to the `.osr` path and `SV2_BEATMAP_SET` to the
+matching `.osz` path when running `npm test`.
 
 **Rendering + playback**
 

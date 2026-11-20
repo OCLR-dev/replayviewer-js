@@ -30,8 +30,9 @@ export interface AccFrame {
  * osu! acc = sum(judgements) / (300 × objectCount); slider sub-results and
  * combo-ignored ticks are excluded.
  */
-export function computeAccTimeline(results: readonly HitResult[]): AccFrame[] {
-  const sorted = [...results].sort((a, b) => a.time - b.time);
+export function computeAccTimeline(results: readonly HitResult[], useSliderEndTime = false): AccFrame[] {
+  const judgementTime = (r: HitResult): number => useSliderEndTime ? r.displayTime ?? r.time : r.time;
+  const sorted = [...results].sort((a, b) => judgementTime(a) - judgementTime(b));
 
   const frames: AccFrame[] = [];
   let judgeSum = 0;
@@ -43,7 +44,7 @@ export function computeAccTimeline(results: readonly HitResult[]): AccFrame[] {
     if (r.comboIgnore) continue;
     judgeSum += r.judgement;
     objCount++;
-    frames.push({ time: r.time, acc: judgeSum / (300 * objCount) });
+    frames.push({ time: judgementTime(r), acc: judgeSum / (300 * objCount) });
   }
 
   return frames;

@@ -15,6 +15,7 @@ export const Mod = {
   Flashlight:  1 << 10,  // 1024
   SpunOut:     1 << 12,  // 4096
   Perfect:     1 << 14,  // 16384 — PF always implies SD
+  ScoreV2:     1 << 29,
 } as const;
 
 /** True if the stable mod bitmask `mods` has any bit of `flag` set. */
@@ -118,6 +119,8 @@ export interface ModDifficulty {
 
   /** True for lazer replays (has a `scoreInfo` block, or gameVersion >= 30000000). */
   readonly isLazer: boolean;
+  /** True when a stable replay has the ScoreV2 mod bit. */
+  readonly isScoreV2: boolean;
   // CL (Classic): stable-like behavior inside a lazer replay.
   readonly isCL: boolean;
   // CL sub-settings (each defaults TRUE when CL is on, FALSE otherwise):
@@ -171,6 +174,7 @@ function lazerVersionAtLeast(clientVersion: string | undefined, year: number, md
 export function computeModDifficulty(beatmap: BeatmapData, replay: ReplayData): ModDifficulty {
   const scoreInfo = replay.scoreInfo;
   const isLazer = (scoreInfo !== undefined) || replay.gameVersion >= 30000000;
+  const isScoreV2 = !isLazer && hasMod(replay.mods, Mod.ScoreV2);
 
   let ar = beatmap.approachRate;
   let cs = beatmap.circleSize;
@@ -423,7 +427,7 @@ export function computeModDifficulty(beatmap: BeatmapData, replay: ReplayData): 
     isNF, isSD, isPF, isAC,
     isMirror, isFadeIn, isCover, coverCoverage, coverAlong,
     flipX, flipY,
-    isLazer, isCL,
+    isLazer, isScoreV2, isCL,
     lzNoSliderAcc, lzLegacyNotelock, lzLegacySound, lzLegacyHP,
   };
 }

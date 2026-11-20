@@ -405,6 +405,11 @@ export function sliderTickTimes(beatmap: BeatmapData, slider: Slider, slideDur: 
   return ticks;
 }
 
+/** Time at which the tail is checked, after the last tick or repeat. */
+export function sliderTailCheckTime(startTime: number, duration: number, lastSubTime: number): number {
+  return Math.max(startTime + duration - Math.min(36, duration / 2), lastSubTime);
+}
+
 // Sliders: notelock treats them resolved iff pressTime >= endTime (stable's slider.IsHit).
 // Spinners: headResolved=true from start; notelock blocks subsequent clicks until endTime.
 interface ObjState {
@@ -626,7 +631,9 @@ export function computeHitResults(beatmap: BeatmapData, replay: ReplayData, modD
     s.headResolved = true;
     s.headHit = false;
     s.headJudgement = 0;
-    s.headPressTime = s.startTime + w50;
+    s.headPressTime = modDiff.isScoreV2 && s.type === 'slider'
+      ? Math.min(s.startTime + w50, s.endTime)
+      : s.startTime + w50;
   }
 
   const results: HitResult[] = [];
@@ -679,7 +686,6 @@ export function computeHitResults(beatmap: BeatmapData, replay: ReplayData, modD
     const followExp2  = (2.4 * hitRadius) ** 2;
     const tailTime   = slider.time + slideDur * slider.slides;
     const totalDur   = slideDur * slider.slides;
-    const tailLeniency = Math.min(36, totalDur / 2);
     const stackShift = slider.stackHeight * hitRadius / 10;
 
     const tickTimes = modDiff.isLazer
@@ -744,13 +750,11 @@ export function computeHitResults(beatmap: BeatmapData, replay: ReplayData, modD
       results.push({
         objectIndex: i, judgement: hit ? 300 : 0,
         time: ev.t, x: b.x, y: b.y,
-        hitSound: 0, comboBreak: !hit && headHit, isSliderSub: true,
+        hitSound: 0, comboBreak: !hit && (headHit || modDiff.isScoreV2), isSliderSub: true,
       });
     }
 
-    const tailStart = nonTail.length > 0
-      ? Math.max(tailTime - tailLeniency, nonTail[nonTail.length - 1]!.t)
-      : tailTime - tailLeniency;
+    const tailStart = sliderTailCheckTime(slider.time, totalDur, nonTail[nonTail.length - 1]?.t ?? slider.time);
 
     while (frameIdx < replay.frames.length && cumTimes[frameIdx]! < tailStart) {
       const f = replay.frames[frameIdx]!;
@@ -780,7 +784,7 @@ export function computeHitResults(beatmap: BeatmapData, replay: ReplayData, modD
     const tb = ballStackedAt(tailStart);
     results.push({
       objectIndex: i, judgement: tailHit ? 300 : 0,
-      time: tailTime, x: tb.x, y: tb.y,
+      time: modDiff.isScoreV2 ? tailStart : tailTime, x: tb.x, y: tb.y,
       hitSound: 0, comboBreak: false,
       isSliderSub: true,
       // Default lazer: the tail is a SliderTail (acc-affecting, max 150).
@@ -800,6 +804,13 @@ export function computeHitResults(beatmap: BeatmapData, replay: ReplayData, modD
     else if (hitNested === 0)                   sliderJudgement = 0;
     else if (hitNested / totalNested >= 0.5)    sliderJudgement = 100;
     else                                        sliderJudgement = 50;
+
+    // SV2 limits the completion result to the head's timing grade. Missing the
+    // head still allows a 50 when another part of the slider was collected.
+    if (modDiff.isScoreV2 && sliderJudgement > 0) {
+      if (s.headJudgement <= 50) sliderJudgement = 50;
+      else if (s.headJudgement === 100 && sliderJudgement === 300) sliderJudgement = 100;
+    }
 
     // Main popup at ball's final resting position: even slides→head, odd→tail (matches stable).
     const finalBall = ballStackedAt(tailTime);

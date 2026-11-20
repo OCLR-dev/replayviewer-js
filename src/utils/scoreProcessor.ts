@@ -1,13 +1,16 @@
 import type { BeatmapData, HitResult, LazerMod } from '../types/index';
-import type { ModDifficulty } from './modDifficulty';
+import { Mod, type ModDifficulty } from './modDifficulty';
 import { slideDurationMs } from './sliderDuration';
 import {
   sliderTickTimes,
+  sliderTailCheckTime,
   stableSpinnerRequirementHalfSpins,
   lazerSpinnerRequirementFullSpins,
   lazerSpinnerMaxBonusSpins,
+  type SpinnerAngleData,
 } from './hitJudge';
 import { sliderTickTimesLazer } from '../renderer/SliderGeometryLazer';
+import { computeAccTimeline, computeComboTimeline, type ComboFrame } from '../renderer/HUDRenderer';
 
 /** osu! rank grade. Silver variants (`SH`/`SSH`) are only emitted when HD or FL is active. */
 export type Grade = 'SSH' | 'SS' | 'SH' | 'S' | 'A' | 'B' | 'C' | 'D';
@@ -63,13 +66,13 @@ export function computeDifficultyMultiplier(beatmap: BeatmapData): number {
   return Math.max(2, Math.min(7, roundToEven((sum / 38) * 5)));
 }
 
-const MOD_MULTIPLIERS: [number, number][] = [
-  [1 << 0,  0.5 ],   // NoFail
+const MOD_MULTIPLIERS: [number, number, number?][] = [
+  [Mod.NoFail, 0.5, 1],
   [1 << 1,  0.5 ],   // Easy
   [1 << 8,  0.3 ],   // HalfTime
   [1 << 3,  1.06],   // Hidden
-  [1 << 4,  1.06],   // HardRock
-  [1 << 6,  1.12],   // DoubleTime (NC shares DT's bit)
+  [Mod.HardRock, 1.06, 1.10],
+  [Mod.DoubleTime, 1.12, 1.20],   // Nightcore shares DT's bit
   [1 << 10, 1.12],   // Flashlight
   [1 << 12, 0.9 ],   // SpunOut
   [1 << 7,  0   ],   // Relax
@@ -77,10 +80,10 @@ const MOD_MULTIPLIERS: [number, number][] = [
 ];
 
 /** Product of the stable per-mod score multipliers for a stable mod bitmask. */
-export function computeModMultiplier(mods: number): number {
+export function computeModMultiplier(mods: number, scoreV2 = false): number {
   let m = 1;
-  for (const [bit, val] of MOD_MULTIPLIERS) {
-    if ((mods & bit) !== 0) m *= val;
+  for (const [bit, scoreV1Value, scoreV2Value = scoreV1Value] of MOD_MULTIPLIERS) {
+    if ((mods & bit) !== 0) m *= scoreV2 ? scoreV2Value : scoreV1Value;
   }
   return m;
 }
@@ -158,9 +161,10 @@ function computeGrade(
 }
 
 type SubKind = 'tick' | 'repeat' | 'tail';
+type SliderSubEvent = { time: number; kind: SubKind };
 
-function buildSliderSubKinds(beatmap: BeatmapData, isLazer: boolean): Map<number, SubKind[]> {
-  const m = new Map<number, SubKind[]>();
+function buildSliderSubEvents(beatmap: BeatmapData, isLazer: boolean): Map<number, SliderSubEvent[]> {
+  const m = new Map<number, SliderSubEvent[]>();
   for (let i = 0; i < beatmap.hitObjects.length; i++) {
     const obj = beatmap.hitObjects[i]!;
     if (obj.type !== 'slider') continue;
@@ -169,17 +173,25 @@ function buildSliderSubKinds(beatmap: BeatmapData, isLazer: boolean): Map<number
     const ticks = isLazer
       ? sliderTickTimesLazer(beatmap, obj, slideDur)
       : sliderTickTimes(beatmap, obj, slideDur);
-    const events: { t: number; kind: SubKind }[] = [];
-    for (const t of ticks) events.push({ t, kind: 'tick' });
+    const events: SliderSubEvent[] = [];
+    for (const time of ticks) events.push({ time, kind: 'tick' });
     for (let edge = 1; edge < obj.slides; edge++) {
-      events.push({ t: obj.time + slideDur * edge, kind: 'repeat' });
+      events.push({ time: obj.time + slideDur * edge, kind: 'repeat' });
     }
-    events.sort((a, b) => a.t - b.t);
-    const kinds: SubKind[] = events.map(e => e.kind);
-    kinds.push('tail');
-    m.set(i, kinds);
+    events.sort((a, b) => a.time - b.time);
+    const duration = slideDur * obj.slides;
+    const tailTime = isLazer ? obj.time + duration
+      : sliderTailCheckTime(obj.time, duration, events[events.length - 1]?.time ?? obj.time);
+    events.push({ time: tailTime, kind: 'tail' });
+    m.set(i, events);
   }
   return m;
+}
+
+function stableSpinnerSpinValue(halfSpin: number, requirement: number, bonusValue: number): number {
+  const afterGap = halfSpin - (requirement + 3);
+  if (afterGap > 0 && afterGap % 2 === 0) return bonusValue;
+  return halfSpin % 2 === 0 ? 100 : 0;
 }
 
 // Stable spinner spin score (danser scorev1 spinner.go / hitresult.go ScoreValue):
@@ -187,14 +199,12 @@ function buildSliderSubKinds(beatmap: BeatmapData, isLazer: boolean): Map<number
 // of: SpinnerBonus (1100) when c past requirement+3 with matching parity, else SpinnerPoints
 // (100) on even c (a full spin), else SpinnerSpin (0). All are RawHits → flat, no combo/mod
 // scaling. We replay the increments c=2..floor(totalRad/π) to match the parity exactly.
-function stableSpinnerSpinScore(od: number, durationMs: number, totalRad: number): number {
+function stableSpinnerSpinScore(od: number, durationMs: number, totalRad: number, bonusValue: number): number {
   const req = stableSpinnerRequirementHalfSpins(od, durationMs);
   const halfSpins = Math.floor(totalRad / Math.PI);
   let score = 0;
   for (let c = 2; c <= halfSpins; c++) {
-    if (c > req + 3 && (c - (req + 3)) % 2 === 0) score += 1100;       // SpinnerBonus
-    else if (c % 2 === 0)                          score += 100;       // SpinnerPoints
-    // odd c (SpinnerSpin) → 0
+    score += stableSpinnerSpinValue(c, req, bonusValue);
   }
   return score;
 }
@@ -217,7 +227,7 @@ type ComboOp = 'increment' | 'reset' | 'hold';
 interface ScoreEvent {
   time:   number;
   // raw = flat (ticks/ends/bonus); scaled = combo-scaled Hit300/100/50.
-  kind:   'raw' | 'scaled';
+  kind:   'raw' | 'scaled' | 'bonus';
   value:  number;
   combo:  ComboOp;
   // null = excluded from acc/grade.
@@ -226,28 +236,55 @@ interface ScoreEvent {
 
 /**
  * Build the osu!standard score/combo/grade timeline from judged hit results.
- * Dispatches to lazer standardised scoring for lazer replays, else stable
- * ScoreV1. Returned frames are sorted by time (beatmap ms), one per scoring event.
+ * Uses stable ScoreV1 or ScoreV2, or lazer standardised scoring. Returned
+ * frames are sorted by time (beatmap ms), one per scoring event.
  */
 export function computeScoreTimeline(
   results: readonly HitResult[],
   beatmap: BeatmapData,
   modDiff: ModDifficulty,
+  spinnerAngles?: ReadonlyMap<number, SpinnerAngleData>,
 ): ScoreFrame[] {
   if (modDiff.isLazer) return computeScoreV3Timeline(results, beatmap, modDiff);
+  if (modDiff.isScoreV2) return computeStableScoreV2Timeline(results, beatmap, modDiff, spinnerAngles);
   return computeScoreV1Timeline(results, beatmap, modDiff);
 }
 
-// Stable ScoreV1; the final frame matches stable's result-screen values.
-function computeScoreV1Timeline(
+/** Score, accuracy and combo timelines shared by analysis and playback. */
+export function computeStdScoreTimelines(
   results: readonly HitResult[],
   beatmap: BeatmapData,
   modDiff: ModDifficulty,
-): ScoreFrame[] {
-  const diffMult = computeDifficultyMultiplier(beatmap);
-  const modMult  = computeModMultiplier(modDiff.mods);
-  const subKinds = buildSliderSubKinds(beatmap, false);
+  spinnerAngles: ReadonlyMap<number, SpinnerAngleData>,
+) {
+  const scoreFrames = computeScoreTimeline(results, beatmap, modDiff, spinnerAngles);
+  let comboFrames: ComboFrame[];
+  if (modDiff.isScoreV2) {
+    // Use the same event order as scoring and animate only actual combo changes.
+    comboFrames = [];
+    let previousCombo = 0;
+    for (const { time, combo } of scoreFrames) {
+      if (combo !== previousCombo) comboFrames.push({ time, combo });
+      previousCombo = combo;
+    }
+  } else {
+    comboFrames = computeComboTimeline(results);
+  }
+  return { scoreFrames, accFrames: computeAccTimeline(results, modDiff.isScoreV2), comboFrames };
+}
 
+function compareStableScoreEvents(a: ScoreEvent, b: ScoreEvent): number {
+  // Equal-time slider subs and spinner bonuses apply before the main judgement.
+  return a.time - b.time || Number(a.kind === 'scaled') - Number(b.kind === 'scaled');
+}
+
+function buildStableScoreEvents(
+  results: readonly HitResult[],
+  beatmap: BeatmapData,
+  modDiff: ModDifficulty,
+  sliderSubs: ReadonlyMap<number, SliderSubEvent[]>,
+  spinnerAngles?: ReadonlyMap<number, SpinnerAngleData>,
+): ScoreEvent[] {
   // Translate each HitResult into one or two ScoreEvents. Slider main results
   // split into SliderStart (at head time) + final Hit300/100/50 (at tail time)
   // so intermediate score/combo updates line up with stable's event ordering.
@@ -261,7 +298,7 @@ function computeScoreV1Timeline(
     if (r.isSliderSub === true) {
       const idx  = subCursor.get(objIdx) ?? 0;
       subCursor.set(objIdx, idx + 1);
-      const kind = subKinds.get(objIdx)?.[idx] ?? 'tick';
+      const kind = sliderSubs.get(objIdx)?.[idx]?.kind ?? 'tick';
       const hit  = r.judgement !== 0;
 
       if (hit) {
@@ -293,7 +330,10 @@ function computeScoreV1Timeline(
       });
 
       if (r.judgement === 0) {
-        events.push({ time: tailTime, kind: 'scaled', value: 0, combo: 'hold', counts: 0 });
+        events.push({
+          time: tailTime, kind: 'scaled', value: 0,
+          combo: modDiff.isScoreV2 ? 'reset' : 'hold', counts: 0,
+        });
       } else {
         // std hitJudge only emits 300|100|50|0; the widened HitResult union (mania 305/200) never reaches here.
         const stdJ = r.judgement as 300 | 100 | 50;
@@ -319,24 +359,45 @@ function computeScoreV1Timeline(
       });
     }
 
-    // Spinner spin points + bonus: flat (RawHits), independent of the final tier and
-    // awarded even on a missed spinner for every full spin completed.
     if (obj.type === 'spinner' && r.spinnerTotalRad !== undefined) {
-      const spin = stableSpinnerSpinScore(modDiff.od, obj.endTime - obj.time, r.spinnerTotalRad);
-      if (spin > 0) {
-        events.push({ time: r.time, kind: 'raw', value: spin, combo: 'hold', counts: null });
+      const duration = obj.endTime - obj.time;
+      const angles = spinnerAngles?.get(objIdx);
+      if (modDiff.isScoreV2 && angles) {
+        const requirement = stableSpinnerRequirementHalfSpins(modDiff.od, duration);
+        let halfSpin = 2;
+        for (let i = 0; i < angles.times.length; i++) {
+          const completed = Math.floor(angles.absAngles[i]! / Math.PI);
+          for (; halfSpin <= completed; halfSpin++) {
+            const value = stableSpinnerSpinValue(halfSpin, requirement, 500);
+            if (value > 0) {
+              events.push({ time: angles.times[i]!, kind: 'bonus', value, combo: 'hold', counts: null });
+            }
+          }
+        }
+      } else {
+        const spin = stableSpinnerSpinScore(modDiff.od, duration, r.spinnerTotalRad, modDiff.isScoreV2 ? 500 : 1100);
+        if (spin > 0) {
+          events.push({
+            time: r.time, kind: modDiff.isScoreV2 ? 'bonus' : 'raw',
+            value: spin, combo: 'hold', counts: null,
+          });
+        }
       }
     }
   }
 
-  // Equal-time order: slider subs apply before the main slider's final scaled event.
-  events.sort((a, b) => {
-    if (a.time !== b.time) return a.time - b.time;
-    const pa = a.kind === 'raw' ? 0 : 1;
-    const pb = b.kind === 'raw' ? 0 : 1;
-    return pa - pb;
-  });
+  return events.sort(compareStableScoreEvents);
+}
 
+// Stable ScoreV1; the final frame matches stable's result-screen values.
+function computeScoreV1Timeline(
+  results: readonly HitResult[],
+  beatmap: BeatmapData,
+  modDiff: ModDifficulty,
+): ScoreFrame[] {
+  const diffMult = computeDifficultyMultiplier(beatmap);
+  const modMult = computeModMultiplier(modDiff.mods);
+  const events = buildStableScoreEvents(results, beatmap, modDiff, buildSliderSubEvents(beatmap, false));
   const frames: ScoreFrame[] = [];
   let score = 0, combo = 0, maxCombo = 0;
   let c300 = 0, c100 = 0, c50 = 0, miss = 0;
@@ -361,6 +422,81 @@ function computeScoreV1Timeline(
     else if (e.counts === 50)  c50++;
     else if (e.counts === 0)   miss++;
 
+    const grade = computeGrade(c300, c100, c50, miss, modDiff.mods);
+    frames.push({ time: e.time, score, combo, maxCombo, grade });
+  }
+
+  return frames;
+}
+
+function computeStableScoreV2Timeline(
+  results: readonly HitResult[],
+  beatmap: BeatmapData,
+  modDiff: ModDifficulty,
+  spinnerAngles?: ReadonlyMap<number, SpinnerAngleData>,
+): ScoreFrame[] {
+  const maxHits = beatmap.hitObjects.length;
+  if (maxHits === 0) return [];
+
+  const modMult = computeModMultiplier(modDiff.mods, true);
+  const sliderSubs = buildSliderSubEvents(beatmap, false);
+
+  // Simulate a perfect play on the entire map for the combo denominator.
+  const perfect: ScoreEvent[] = [];
+  for (let i = 0; i < maxHits; i++) {
+    const obj = beatmap.hitObjects[i]!;
+    const subs = sliderSubs.get(i);
+    if (obj.type === 'slider' && subs) {
+      perfect.push({ time: obj.time, kind: 'raw', value: 30, combo: 'increment', counts: null });
+      for (const sub of subs) {
+        perfect.push({
+          time: sub.time, kind: 'raw', value: sub.kind === 'tick' ? 10 : 30,
+          combo: 'increment', counts: null,
+        });
+      }
+      const time = obj.time + slideDurationMs(beatmap, obj) * obj.slides;
+      perfect.push({ time, kind: 'scaled', value: 300, combo: 'hold', counts: 300 });
+    } else {
+      const time = obj.type === 'spinner' ? obj.endTime : obj.time;
+      perfect.push({ time, kind: 'scaled', value: 300, combo: 'increment', counts: 300 });
+    }
+  }
+  perfect.sort(compareStableScoreEvents);
+
+  // Both totals are stored in tenths so value * (1 + combo / 10) stays exact.
+  let maxComboPart = 0, perfectCombo = 0;
+  for (const e of perfect) {
+    if (e.combo === 'increment') perfectCombo++;
+    maxComboPart += e.value * (10 + perfectCombo);
+  }
+
+  const events = buildStableScoreEvents(results, beatmap, modDiff, sliderSubs, spinnerAngles);
+  const frames: ScoreFrame[] = [];
+  let combo = 0, maxCombo = 0, comboPart = 0, bonus = 0;
+  let hits = 0, rawScore = 0;
+  let c300 = 0, c100 = 0, c50 = 0, miss = 0;
+
+  for (const e of events) {
+    if (e.combo === 'reset') combo = 0;
+    else if (e.combo === 'increment') combo++;
+    maxCombo = Math.max(maxCombo, combo);
+
+    if (e.kind === 'bonus') bonus += e.value;
+    else comboPart += e.value * (10 + combo);
+
+    if (e.counts !== null) {
+      hits++;
+      rawScore += e.counts;
+      if      (e.counts === 300) c300++;
+      else if (e.counts === 100) c100++;
+      else if (e.counts === 50)  c50++;
+      else                     miss++;
+    }
+
+    // Stable's score uses single-precision accuracy. Only whole objects advance progress.
+    const acc = hits > 0 ? Math.fround(Math.fround(rawScore) / Math.fround(300 * hits)) : 1;
+    const score = Math.round((700000 * (comboPart / maxComboPart)
+      + 300000 * acc ** 10 * (hits / maxHits) + bonus) * modMult);
     const grade = computeGrade(c300, c100, c50, miss, modDiff.mods);
     frames.push({ time: e.time, score, combo, maxCombo, grade });
   }
@@ -420,7 +556,7 @@ function computeScoreV3Timeline(
 ): ScoreFrame[] {
   const modMult = computeModMultiplier(modDiff.mods);
   const useLazerSliderAcc = !modDiff.lzNoSliderAcc;
-  const subKinds = buildSliderSubKinds(beatmap, true);
+  const sliderSubs = buildSliderSubEvents(beatmap, true);
 
   // Perfect-play prepass: comboPartMax / accPartMax / maxHits are the denominators.
   let comboPartMax = 0;
@@ -445,10 +581,10 @@ function computeScoreV3Timeline(
       continue;
     }
     pushMax(useLazerSliderAcc ? 'base' : 'sliderStart');
-    const subs = subKinds.get(i) ?? [];
-    for (const s of subs) {
-      if (s === 'tail') continue;
-      pushMax(s === 'tick' ? 'sliderPoint' : 'sliderRepeat');
+    const subs = sliderSubs.get(i) ?? [];
+    for (const { kind } of subs) {
+      if (kind === 'tail') continue;
+      pushMax(kind === 'tick' ? 'sliderPoint' : 'sliderRepeat');
     }
     pushMax(useLazerSliderAcc ? 'sliderEnd' : 'legacyEnd');
   }
@@ -475,7 +611,7 @@ function computeScoreV3Timeline(
     if (r.isSliderSub === true) {
       const idx = subCursor.get(objIdx) ?? 0;
       subCursor.set(objIdx, idx + 1);
-      const subKind = subKinds.get(objIdx)?.[idx] ?? 'tick';
+      const subKind = sliderSubs.get(objIdx)?.[idx]?.kind ?? 'tick';
       const hit = r.judgement !== 0;
 
       let kind: LzKind;

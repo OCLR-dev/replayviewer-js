@@ -25,7 +25,8 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
-    "check": "node scripts/check-imports.mjs"
+    "check": "node scripts/check-imports.mjs",
+    "test": "node --test"
   },
   "devDependencies": {
     "@soundtouchjs/core": "^2.0.4",

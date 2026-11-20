@@ -1,6 +1,6 @@
-import type { BeatmapData, ReplayData, HitResult, ReplayFrame } from '../types/index';
+import type { BeatmapData, ReplayData, ReplayFrame } from '../types/index';
 import type { ModDifficulty } from '../utils/modDifficulty';
-import { computeComboTimeline } from './HUDRenderer';
+import type { ComboFrame } from './HUDRenderer';
 import { CANVAS_W, CANVAS_H, SCALE, OFFSET_X, OFFSET_Y } from './playfield';
 
 // Must match HitObjectRenderer / CursorRenderer.
@@ -208,7 +208,7 @@ export interface FlashlightTimelines {
 function buildSizeTimeline(
   beatmap: BeatmapData,
   modDiff: ModDifficulty,
-  hitResults: readonly HitResult[],
+  comboFrames: readonly ComboFrame[],
 ): Segment[] {
   const segments: Segment[] = [];
   const hos = beatmap.hitObjects;
@@ -228,7 +228,6 @@ function buildSizeTimeline(
     | { kind: 'breakEndPrep'; t: number };
 
   const events: Evt[] = [];
-  const comboFrames = computeComboTimeline(hitResults);
   for (const cf of comboFrames) events.push({ kind: 'combo', t: cf.time, combo: cf.combo });
   for (const b of beatmap.breaks) {
     if (b.endTime - b.startTime > BREAK_MIN_DURATION) {
@@ -297,12 +296,12 @@ export class Flashlight {
     beatmap: BeatmapData,
     replay: ReplayData,
     modDiff: ModDifficulty,
-    hitResults: readonly HitResult[],
+    comboFrames: readonly ComboFrame[],
     trackingIntervals: readonly { start: number; end: number }[],
     qualityTotal: number = 1,
   ) {
     this.timelines = {
-      sizeSegments: buildSizeTimeline(beatmap, modDiff, hitResults),
+      sizeSegments: buildSizeTimeline(beatmap, modDiff, comboFrames),
       dimSegments:  buildDimTimeline(trackingIntervals),
       smoothed:     buildSmoothedCursor(replay),
     };

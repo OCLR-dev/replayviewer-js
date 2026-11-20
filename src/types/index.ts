@@ -346,8 +346,7 @@ export interface HitResult {
   // std/taiko results) leave this undefined.
   subResult?: 'head' | 'tail' | 'body';
   time: number;
-  // Override popup time; slider heads use tailTime so popup appears at slider end
-  // while combo/accuracy ordering still uses `time`.
+  // Override popup time. Slider heads use tail time for the popup and SV2 accuracy.
   displayTime?: number;
   x: number;
   y: number;

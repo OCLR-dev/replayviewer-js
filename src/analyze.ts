@@ -7,9 +7,9 @@ import type { BeatmapData, ReplayData, HitResult } from './types/index';
 import { computeModDifficulty, type ModDifficulty } from './utils/modDifficulty';
 import { applyStacking } from './utils/stacking';
 import { computeHitResults } from './utils/hitJudge';
-import { computeScoreTimeline, type ScoreFrame } from './utils/scoreProcessor';
+import { computeStdScoreTimelines, type ScoreFrame } from './utils/scoreProcessor';
 import {
-  computeAccTimeline, computeTaikoAccTimeline, computeComboTimeline,
+  computeTaikoAccTimeline, computeComboTimeline,
   type AccFrame, type ComboFrame,
 } from './renderer/HUDRenderer';
 import {
@@ -45,7 +45,7 @@ export interface ReplayAnalysis {
   scoreFrames: readonly ScoreFrame[];
   /** Running-accuracy timeline. */
   accFrames: readonly AccFrame[];
-  /** Combo timeline (current + max combo). */
+  /** Running combo timeline. Score frames also carry max combo. */
   comboFrames: readonly ComboFrame[];
   /** Hit-error (unstable rate) timeline; empty for catch (judgement is positional — no hit windows). */
   urTimeline: URTimeline;
@@ -78,13 +78,11 @@ export function analyzeReplay(beatmap: BeatmapData, replay: ReplayData): ReplayA
 
   if (mode === 0) {
     applyStacking(beatmap, modDiff);
-    const { results } = computeHitResults(beatmap, replay, modDiff);
+    const { results, spinnerAngles } = computeHitResults(beatmap, replay, modDiff);
     return {
       mode, modDiff,
       hitResults:  results,
-      scoreFrames: computeScoreTimeline(results, beatmap, modDiff),
-      accFrames:   computeAccTimeline(results),
-      comboFrames: computeComboTimeline(results),
+      ...computeStdScoreTimelines(results, beatmap, modDiff, spinnerAngles),
       urTimeline:  computeURTimeline(results, beatmap, modDiff),
     };
   }

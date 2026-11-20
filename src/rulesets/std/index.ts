@@ -11,9 +11,8 @@ import { drawFollowpoints } from '../../renderer/FollowpointRenderer';
 import { drawCursor } from '../../renderer/CursorRenderer';
 import { drawJudgements } from '../../renderer/JudgementRenderer';
 import { drawKeyOverlay } from '../../renderer/KeyOverlayRenderer';
-import { computeAccTimeline, computeComboTimeline } from '../../renderer/HUDRenderer';
 import { computeHitResults, type SpinnerAngleData } from '../../utils/hitJudge';
-import { computeScoreTimeline } from '../../utils/scoreProcessor';
+import { computeStdScoreTimelines } from '../../utils/scoreProcessor';
 import { computeURTimeline } from '../../renderer/URBarRenderer';
 import { Flashlight } from '../../renderer/FlashlightRenderer';
 
@@ -59,7 +58,7 @@ function stdFlashlight(s: StdSession): Flashlight {
   if (s.flashlight !== null) return s.flashlight;
   let fl = _flCache.get(s);
   if (fl === undefined) {
-    fl = new Flashlight(s.beatmap, s.replay, s.modDiff, s.hitResults, s.trackingIntervals, s.qualityTotal);
+    fl = new Flashlight(s.beatmap, s.replay, s.modDiff, s.comboFrames, s.trackingIntervals, s.qualityTotal);
     _flCache.set(s, fl);
   }
   return fl;
@@ -80,12 +79,10 @@ export const stdRuleset: Ruleset<StdSession> = {
     qualityTotal: number,
   ): StdSession {
     const { results, spinnerAngles, trackingIntervals } = computeHitResults(beatmap, replay, modDiff);
-    const accFrames   = computeAccTimeline(results);
-    const comboFrames = computeComboTimeline(results);
-    const scoreFrames = computeScoreTimeline(results, beatmap, modDiff);
+    const timelines = computeStdScoreTimelines(results, beatmap, modDiff, spinnerAngles);
     const urTimeline  = computeURTimeline(results, beatmap, modDiff);
     const flashlight  = modDiff.isFL
-      ? new Flashlight(beatmap, replay, modDiff, results, trackingIntervals, qualityTotal)
+      ? new Flashlight(beatmap, replay, modDiff, timelines.comboFrames, trackingIntervals, qualityTotal)
       : null;
     return {
       beatmap, replay, modDiff, skin,
@@ -93,9 +90,7 @@ export const stdRuleset: Ruleset<StdSession> = {
       spinnerAngles,
       trackingIntervals,
       flashlight,
-      accFrames,
-      comboFrames,
-      scoreFrames,
+      ...timelines,
       urTimeline,
       qualityTotal,
     };
