@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.0 — 2026-11-20
+
+- Add osu!stable ScoreV2 support for osu!standard replays, including slider head accuracy and score, accuracy and combo timelines in analysis and playback.
+
 ## 1.0.0 — 2026-09-19
 
 - Storyboard and video support; opt in with `storyboard: true` / `video: true` on `createReplaySession`
